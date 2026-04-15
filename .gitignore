@@ -1,5 +1,6 @@
 *.pyc
 .vscode
+.vs
 output
 build
 diff_rasterization/diff_rast.egg-info
