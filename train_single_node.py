@@ -1,22 +1,3 @@
-"""
-Gaussian Splatting Training Pipeline
-=====================================
-Fully corrected, production-ready implementation.
-
-pip install torch torchvision gsplat pytorch-msssim Pillow numpy
-
-Data layout:
-    data/
-      images/          <- COLMAP-registered input images
-      sparse/
-        0/
-          cameras.bin
-          images.bin
-          points3D.bin  (optional, enables COLMAP-based init)
-
-Run:
-    python gaussian_splatting_final.py --data_dir data --output output.ply
-"""
 
 import os
 import math
