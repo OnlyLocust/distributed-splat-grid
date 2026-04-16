@@ -1,0 +1,14 @@
+*.pyc
+.vscode
+.vs
+output
+build
+diff_rasterization/diff_rast.egg-info
+diff_rasterization/dist
+tensorboard_3d
+screenshots
+Miniconda3-latest-Linux-x86_64.sh
+data
+data.zip
+results/
+*.ply
