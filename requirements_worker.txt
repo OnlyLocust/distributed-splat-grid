@@ -1,0 +1,16 @@
+# Splat-Grid Worker dependencies
+# Install with: pip install -r requirements_worker.txt
+
+# Core ML / rendering
+torch>=2.1.0
+gsplat>=0.1.11
+Pillow>=10.0.0
+numpy>=1.24.0
+
+# HTTP
+requests>=2.31.0
+
+# (Master only — not strictly needed on worker, but harmless)
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
