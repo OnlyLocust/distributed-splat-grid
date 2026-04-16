@@ -116,14 +116,28 @@ def _images_in_voxel(
     image_metas: dict,
     vmin: np.ndarray,
     vmax: np.ndarray,
-    margin_factor: float = 0.25,
+    margin_factor: float = 1.50,
 ) -> list[int]:
+    """
+    Return image IDs whose camera centres fall within voxel + margin.
+    margin_factor=1.50 expands each side by 150% of the voxel dimension,
+    providing wide overlap so cameras near voxel edges are always captured.
+    Fallback: if still zero matches, assign every image — an empty voxel
+    is always worse than one that trains on all available views.
+    """
     margin = (vmax - vmin) * margin_factor
     lo, hi = vmin - margin, vmax + margin
-    return [
+    matched = [
         img_id for img_id, meta in image_metas.items()
         if np.all(_camera_center(meta) >= lo) and np.all(_camera_center(meta) <= hi)
     ]
+    if not matched:
+        log.warning(
+            f"  [_images_in_voxel] No cameras in expanded voxel "
+            f"(margin_factor={margin_factor}) — assigning ALL {len(image_metas)} images as fallback."
+        )
+        matched = list(image_metas.keys())
+    return matched
 
 
 def init_master(data_dir: str, grid_spec: str, output_dir: str) -> None:

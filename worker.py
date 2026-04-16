@@ -142,20 +142,41 @@ class MasterClient:
     # ── Task request ──────────────────────────────────────────────────────────
 
     def request_task(self) -> dict | None:
-        """Returns a task dict or None if queue is exhausted / error."""
+        """
+        Returns a task dict, or None when the queue is truly exhausted.
+        - HTTP 404: no PENDING tasks (may still be IN_PROGRESS)
+        - HTTP 429: fair-share cap; back off and retry transparently
+        """
+        for _attempt in range(10):
+            try:
+                r = self.sess.get(
+                    f"{self.base}/get_task",
+                    params={"worker_id": self.worker_id},
+                    timeout=self.timeout,
+                )
+                if r.status_code == 404:
+                    return None          # no PENDING tasks right now
+                if r.status_code == 429:
+                    # Fair-share cap: back off silently, then let the
+                    # caller decide whether to keep waiting.
+                    log.info("[request_task] Fair-share cap — backing off 15s …")
+                    time.sleep(15)
+                    return None          # caller will retry via its own loop
+                r.raise_for_status()
+                return r.json()
+            except requests.exceptions.RequestException as exc:
+                log.error(f"[request_task] Network error: {exc}")
+                time.sleep(5)
+        return None
+
+    def get_queue_status(self) -> dict:
+        """Query /status to see how many tasks are PENDING vs IN_PROGRESS."""
         try:
-            r = self.sess.get(
-                f"{self.base}/get_task",
-                params={"worker_id": self.worker_id},
-                timeout=self.timeout,
-            )
-            if r.status_code == 404:
-                return None
+            r = self.sess.get(f"{self.base}/status", timeout=30)
             r.raise_for_status()
             return r.json()
-        except requests.exceptions.RequestException as exc:
-            log.error(f"[request_task] {exc}")
-            return None
+        except requests.exceptions.RequestException:
+            return {}
 
     # ── Heartbeat ─────────────────────────────────────────────────────────────
 
@@ -735,10 +756,11 @@ def parse_args() -> argparse.Namespace:
                    help=f"Training iterations per chunk (default: {DEFAULT_ITERATIONS})")
     p.add_argument("--max_tasks",   type=int, default=0,
                    help="Max chunks to process (0 = unlimited — drain queue)")
-    p.add_argument("--retry_wait",  type=int, default=15,
+    p.add_argument("--retry_wait",  type=int, default=30,
                    help="Seconds to wait when master has no tasks ready")
-    p.add_argument("--max_retries", type=int, default=5,
-                   help="Consecutive 'no task' responses before worker exits")
+    p.add_argument("--max_retries", type=int, default=20,
+                   help="Consecutive 'no task' responses before worker exits "
+                        "(default 20 × 30s = 10 min, longer than the 300s watchdog)")
     return p.parse_args()
 
 
@@ -773,6 +795,29 @@ def main() -> None:
         task = client.request_task()
 
         if task is None:
+            # Smart retry: distinguish "tasks still IN_PROGRESS (need to wait
+            # for watchdog)" from "queue truly empty (can exit)".
+            status      = client.get_queue_status()
+            in_progress = status.get("IN_PROGRESS", 0)
+            completed   = status.get("COMPLETED",   0)
+            total       = status.get("total",        0)
+
+            if total > 0 and completed >= total:
+                log.info("All tasks COMPLETED — worker exiting cleanly.")
+                break
+
+            if in_progress > 0:
+                # Some tasks are still being processed (or stale IN_PROGRESS
+                # waiting for the 300s watchdog to reset them).
+                # Reset retries so we don't exit before reclaim happens.
+                log.info(
+                    f"No PENDING task but {in_progress} task(s) still "
+                    f"IN_PROGRESS — waiting {args.retry_wait}s for watchdog …"
+                )
+                retries = 0
+                time.sleep(args.retry_wait)
+                continue
+
             retries += 1
             if retries >= args.max_retries:
                 log.info("No more tasks available — all chunks likely done. Exiting.")
@@ -801,8 +846,31 @@ def main() -> None:
             # 1. Download images
             gt_images, hw = load_images_from_task(task, client, img_dir)
             if not gt_images:
-                log.warning("No images loaded — skipping task.")
+                # Voxel has no usable training views (cameras outside bbox).
+                # MUST still submit a result so the task reaches COMPLETED;
+                # silently skipping leaves it IN_PROGRESS forever, which
+                # blocks other workers from getting tasks.
+                log.warning(
+                    f"[task {task_id[:8]}] No images loaded — "
+                    "submitting empty PLY to mark task COMPLETED."
+                )
+                ply_name = (
+                    f"chunk_{task_id[:8]}_"
+                    f"{voxel_idx[0]}_{voxel_idx[1]}_{voxel_idx[2]}.ply"
+                )
+                ply_path = out_dir / ply_name
+                with open(ply_path, "wb") as _f:
+                    _f.write(b"ply\nformat binary_little_endian 1.0\n")
+                    _f.write(b"element vertex 0\n")
+                    _f.write(
+                        b"property float x\nproperty float y\n"
+                        b"property float z\nend_header\n"
+                    )
                 hb_thread.stop()
+                hb_thread.join(timeout=5)
+                client.submit_ply(task_id, ply_path)
+                tasks_done += 1
+                log.info(f"[task {task_id[:8]}] Empty-PLY submitted (0-image voxel).")
                 continue
 
             # 2. Initialise Gaussians
